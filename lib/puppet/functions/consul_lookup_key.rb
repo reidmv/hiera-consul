@@ -34,6 +34,15 @@ Puppet::Functions.create_function(:consul_lookup_key) do
     connection = context.cached_value(:clk_connection)
     pathkey = "#{options['path']}/#{key}"
 
+    # Special case for "services" path
+    if options['path'] == 'services'
+      unless context.cache_has_key(:clk_services)
+        cache_services!(context) 
+        context.cache(:clk_services, true)
+      end
+      return context.cached_value(key) || context.not_found()
+    end
+
     # Validate the path and key being asked for
     if options['path'] !~ /^\/v\d\/(catalog|kv)\//
       Puppet.debug("[hiera-consul]: We only support queries to catalog and kv and you asked #{options['path']}, skipping")
@@ -143,33 +152,35 @@ Puppet::Functions.create_function(:consul_lookup_key) do
     return answer
   end
 
-  # WHAT IS THIS FOR???
-  # def build_cache!
-  #   services = query_consul('/v1/catalog/services')
-  #   return nil unless services.is_a? Hash
-  #   services.each do |key, value|
-  #     service = query_consul("/v1/catalog/service/#{key}")
-  #     next unless service.is_a? Array
-  #     service.each do |node_hash|
-  #       node = node_hash['Node']
-  #       node_hash.each do |property, value|
-  #         # Value of a particular node
-  #         next if property == 'ServiceID'
-  #         unless property == 'Node'
-  #           @cache["#{key}_#{property}_#{node}"] = value
-  #         end
-  #         unless @cache.has_key?("#{key}_#{property}")
-  #           # Value of the first registered node
-  #           @cache["#{key}_#{property}"] = value
-  #           # Values of all nodes
-  #           @cache["#{key}_#{property}_array"] = [value]
-  #         else
-  #           @cache["#{key}_#{property}_array"].push(value)
-  #         end
-  #       end
-  #     end
-  #   end
-  #   Puppet.debug("[hiera-consul]: Cache #{@cache}")
-  # end
+  def cache_services!(context)
+    services = query_consul('/v1/catalog/services')
+    return nil unless services.is_a? Hash
+    services.each do |key, value|
+      service = query_consul("/v1/catalog/service/#{key}")
+      next unless service.is_a? Array
+      service.each do |node_hash|
+        node = node_hash['Node']
+        node_hash.each do |property, value|
+          # Value of a particular node
+          next if property == 'ServiceID'
+          unless property == 'Node'
+            context.cache("#{key}_#{property}_#{node}", value)
+          end
+          unless context.cache_has_key("#{key}_#{property}")
+            # Value of the first registered node
+            context.cache("#{key}_#{property}", value)
+            # Values of all nodes
+            context.cache("#{key}_#{property}_array", [value])
+          else
+            # Add an entry to the existing *_array cache value
+            prev_array = context.cached_value("#{key}_#{property}_array")
+            new_array = prev_array.push(value)
+            context.cache("#{key}_#{property}_array", new_array)
+          end
+        end
+      end
+    end
+    Puppet.debug("[hiera-consul]: services #{@cache}")
+  end
 
 end
