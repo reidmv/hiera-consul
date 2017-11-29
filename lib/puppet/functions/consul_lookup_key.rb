@@ -15,58 +15,65 @@ Puppet::Functions.create_function(:consul_lookup_key) do
     return context.cached_value(key) if context.cache_has_key(key)
 
     # Check for minimum required configuration before attempting any lookups.
-    # In the event minimum required configuration is not found an exception
+    # In the event minimum required configuration is not found, an exception
     # will be raised.
-    if (options['host'] && options['port'])
-      connection = Net::HTTP.new(options['host'], options['port'])
-    else
-      raise "[hiera-consul]: Missing minimum configuration, please check hiera.yaml"
-    end
+    validate_options(options)
 
     # Cache relevant information and the Net::HTTP connection object. Because
     # we pass context around to most function calls, not options, we'll cache
-    # options as well.. The context and cache is state data.
+    # options as well. The context and cache is state data.
     # (clk == consul lookup key)
     context.cache(:clk_options, options) unless context.cache_has_key(:clk_options)
-    context.cache(:clk_connection, connection(context)) unless context.cache_has_key(:clk_connection)
+    context.cache(:clk_connection, connection(options)) unless context.cache_has_key(:clk_connection)
 
     # Begin the lookup.
     connection = context.cached_value(:clk_connection)
-    pathkey = "#{options['path']}/#{key}"
 
-    # Special case for "services" path
-    if options['path'] == 'services'
-      unless context.cache_has_key(:clk_services)
-        cache_services!(context) 
-        context.cache(:clk_services, true)
+    options['endpoints'].each do |endpoint|
+      # Special case for "services" path
+      if endpoint == 'services'
+        cache_services!(context) unless context.cache_has_key(:clk_services)
+        return context.cached_value(key) if context.cache_has_key(key)
       end
-      return context.cached_value(key) || context.not_found()
+
+      next unless valid_endpoint?(endpoint)
+      next unless valid_key?(key)
+
+      result = query_consul(endpoint, key, context)
+
+      return context.cache(key, result) unless result.nil?
     end
 
-    # Validate the path and key being asked for
-    if options['path'] !~ /^\/v\d\/(catalog|kv)\//
-      Puppet.debug("[hiera-consul]: We only support queries to catalog and kv and you asked #{options['path']}, skipping")
-      return context.not_found()
-    end
-
-    if pathkey.match("//")
-      Puppet.debug("[hiera-consul]: The specified path #{pathkey} is malformed, skipping")
-      return context.not_found()
-    end
-
-    # Query consul for the path/key value
-    result = query_consul(pathkey, context)
-
-    # Either cache and return the result, or indicate not_found(). The
-    # query_consul function returns nil if no value was found in consul.
-    # Because of this implementation decision, the consul backend cannot at
-    # this time cannot store a literal nil.
-    result.nil? ? context.not_found() : context.cache(key, result)
+    # If we got this far, we didn't find a result
+    context.not_found()
   end
 
-  def connection(context)
-    options = context.cached_value(:clk_options)
+  def validate_options(options)
+    unless options.key?('uri') &&
+           options.key?('endpoints')
+      raise "[hiera-consul]: Missing minimum configuration, please check hiera.yaml"
+    end
+  end
 
+  def valid_endpoint?(endpoint)
+    if endpoint !~ /^\/v\d\/(catalog|kv)\//
+      Puppet.debug("[hiera-consul]: We only support queries to catalog and kv and you queried #{endpoint}, skipping")
+      false
+    else
+      true
+    end
+  end
+
+  def valid_key?(key)
+    if key.match("//")
+      Puppet.debug("[hiera-consul]: The specified key #{key} is malformed, skipping")
+      false
+    else
+      true
+    end
+  end
+
+  def connection(options)
     connection.read_timeout = options['http_read_timeout'] || 10
     connection.open_timeout = options['http_connect_timeout'] || 10
 
@@ -104,7 +111,8 @@ Puppet::Functions.create_function(:consul_lookup_key) do
     end
   end
 
-  def query_consul(path, context)
+  def query_consul(endpoint, key, context)
+    path = "#{endpoint}/#{key}"
     consul = context.cached_value(:clk_connection)
     options = context.cached_value(:clk_options)
 
@@ -180,6 +188,7 @@ Puppet::Functions.create_function(:consul_lookup_key) do
         end
       end
     end
+    context.cache(:clk_services, true)
     Puppet.debug("[hiera-consul]: services #{@cache}")
   end
 
