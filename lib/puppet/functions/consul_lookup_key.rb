@@ -14,7 +14,7 @@ Puppet::Functions.create_function(:consul_lookup_key) do
 
   def consul_lookup_key(key, options, context)
     if context.cache_has_key(key)
-      context.explain { "  Cached value present for key: #{key}" }
+      context.explain { "  cached value present for key: #{key}" }
       return context.cached_value(key)
     end
 
@@ -40,18 +40,25 @@ Puppet::Functions.create_function(:consul_lookup_key) do
       if endpoint == 'services'
         cache_services!(context) unless context.cache_has_key(:clk_services)
         return context.cached_value(key) if context.cache_has_key(key)
-        context.explain { "  No such key: #{key}" }
+        context.explain { "  no such key: #{key}" }
         next
       end
 
-      next unless valid_endpoint?(endpoint)
-      next unless valid_key?(key)
+      unless valid_endpoint?(endpoint)
+        context.explain { "  malformed endpoint #{endpoint}; queries can only be made to catalog or kv; skipping" }
+        next
+      end
+
+      unless valid_key?(key)
+        context.explain { "  the specified key #{key} is malformed; skipping" }
+        next
+      end
 
       path = "#{endpoint}/#{key}"
       result = query_consul(path, context)
 
       return context.cache(key, result) unless result.nil?
-      context.explain { "  No such key: #{key}" }
+      context.explain { "  no such key: #{key}" }
     end
 
     # If we got this far, we didn't find a result
@@ -67,7 +74,6 @@ Puppet::Functions.create_function(:consul_lookup_key) do
 
   def valid_endpoint?(endpoint)
     if endpoint !~ /^\/v\d\/(catalog|kv)\//
-      Puppet.debug("[hiera-consul]: We only support queries to catalog and kv and you queried #{endpoint}, skipping")
       false
     else
       true
@@ -76,7 +82,6 @@ Puppet::Functions.create_function(:consul_lookup_key) do
 
   def valid_key?(key)
     if key.match("//")
-      Puppet.debug("[hiera-consul]: The specified key #{key} is malformed, skipping")
       false
     else
       true
@@ -172,9 +177,13 @@ Puppet::Functions.create_function(:consul_lookup_key) do
   end
 
   def cache_services!(context)
-    context.explain { 'Populating cache with special "services" endpoint values' }
+    # Initialize cache with signal value
+    cache = {:clk_services => true}
+    context.explain { 'populating cache with special "services" endpoint values' }
+
     services = query_consul('/v1/catalog/services', context)
     return nil unless services.is_a? Hash
+
     services.each do |key, value|
       service = query_consul("/v1/catalog/service/#{key}", context)
       next unless service.is_a? Array
@@ -184,24 +193,22 @@ Puppet::Functions.create_function(:consul_lookup_key) do
           # Value of a particular node
           next if property == 'ServiceID'
           unless property == 'Node'
-            context.cache("#{key}_#{property}_#{node}", value)
+            cache["#{key}_#{property}_#{node}"] = value
           end
-          unless context.cache_has_key("#{key}_#{property}")
+          unless cache.has_key?("#{key}_#{property}")
             # Value of the first registered node
-            context.cache("#{key}_#{property}", value)
+            cache["#{key}_#{property}"] = value
             # Values of all nodes
-            context.cache("#{key}_#{property}_array", [value])
+            cache["#{key}_#{property}_array"] = [value]
           else
-            # Add an entry to the existing *_array cache value
-            prev_array = context.cached_value("#{key}_#{property}_array")
-            new_array = prev_array.push(value)
-            context.cache("#{key}_#{property}_array", new_array)
+            cache["#{key}_#{property}_array"].push(value)
           end
         end
       end
     end
-    context.cache(:clk_services, true)
-    Puppet.debug("[hiera-consul]: services #{@cache}")
+
+    context.cache_all(cache)
+    context.explain { "services endpoint values: #{cache}" }
   end
 
 end
