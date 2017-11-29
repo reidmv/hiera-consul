@@ -1,3 +1,4 @@
+require 'uri'
 require 'net/http'
 require 'net/https'
 require 'json'
@@ -12,7 +13,10 @@ Puppet::Functions.create_function(:consul_lookup_key) do
   end
 
   def consul_lookup_key(key, options, context)
-    return context.cached_value(key) if context.cache_has_key(key)
+    if context.cache_has_key(key)
+      context.explain { "  Cached value present for key: #{key}" }
+      return context.cached_value(key)
+    end
 
     # Check for minimum required configuration before attempting any lookups.
     # In the event minimum required configuration is not found, an exception
@@ -30,18 +34,24 @@ Puppet::Functions.create_function(:consul_lookup_key) do
     connection = context.cached_value(:clk_connection)
 
     options['endpoints'].each do |endpoint|
+      context.explain { "Endpoint: #{endpoint}" }
+
       # Special case for "services" path
       if endpoint == 'services'
         cache_services!(context) unless context.cache_has_key(:clk_services)
         return context.cached_value(key) if context.cache_has_key(key)
+        context.explain { "  No such key: #{key}" }
+        next
       end
 
       next unless valid_endpoint?(endpoint)
       next unless valid_key?(key)
 
-      result = query_consul(endpoint, key, context)
+      path = "#{endpoint}/#{key}"
+      result = query_consul(path, context)
 
       return context.cache(key, result) unless result.nil?
+      context.explain { "  No such key: #{key}" }
     end
 
     # If we got this far, we didn't find a result
@@ -74,6 +84,8 @@ Puppet::Functions.create_function(:consul_lookup_key) do
   end
 
   def connection(options)
+    uri = URI(options['uri'])
+    connection = Net::HTTP.new(uri.host, uri.port)
     connection.read_timeout = options['http_read_timeout'] || 10
     connection.open_timeout = options['http_connect_timeout'] || 10
 
@@ -111,8 +123,7 @@ Puppet::Functions.create_function(:consul_lookup_key) do
     end
   end
 
-  def query_consul(endpoint, key, context)
-    path = "#{endpoint}/#{key}"
+  def query_consul(path, context)
     consul = context.cached_value(:clk_connection)
     options = context.cached_value(:clk_options)
 
@@ -161,10 +172,11 @@ Puppet::Functions.create_function(:consul_lookup_key) do
   end
 
   def cache_services!(context)
-    services = query_consul('/v1/catalog/services')
+    context.explain { 'Populating cache with special "services" endpoint values' }
+    services = query_consul('/v1/catalog/services', context)
     return nil unless services.is_a? Hash
     services.each do |key, value|
-      service = query_consul("/v1/catalog/service/#{key}")
+      service = query_consul("/v1/catalog/service/#{key}", context)
       next unless service.is_a? Array
       service.each do |node_hash|
         node = node_hash['Node']
