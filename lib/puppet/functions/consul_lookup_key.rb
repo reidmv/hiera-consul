@@ -138,7 +138,7 @@ Puppet::Functions.create_function(:consul_lookup_key) do
       result = consul.request(httpreq)
     rescue Exception => e
       Puppet.debug("[hiera-consul]: Could not connect to Consul")
-      raise Exception, e.message unless options['failure'].chomp == 'graceful'
+      raise Exception, "[hiera-consul]: Cound not connect to Consul: #{e.message}" unless options['failure'].chomp == 'graceful'
       return answer
     end
     unless result.kind_of?(Net::HTTPSuccess)
